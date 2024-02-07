@@ -1,0 +1,22 @@
+[package]
+name = "sovereign_render"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gpu-allocator = { version = "0.25", default-features = false, features = ["d3d12"] }
+raw-window-handle = "0.6"
+tracing = "0.1"
+
+[dependencies.windows]
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Threading"
+]

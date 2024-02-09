@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "sovereign",
+    "sovereign", "sovereign_gltf",
     "sovereign_render"
 ]
+
+[profile.dev.package.gltf]
+opt-level = 3

@@ -1,5 +1,6 @@
+use sovereign_gltf::load_gltf;
 use sovereign_render::Renderer;
-use std::error::Error;
+use std::{error::Error, path::Path};
 use winit::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
@@ -17,8 +18,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build(&event_loop)?;
     let mut renderer = Renderer::new(640, 480, &window)?;
 
-    event_loop.set_control_flow(ControlFlow::Poll);
+    let gltf = load_gltf(&mut renderer, &Path::new("assets/meshes/Sponza/NewSponza_Main_glTF_002.gltf"))?;
+    println!("{:?}", gltf);
 
+    event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run(move |event, elwt| match event {
         Event::WindowEvent {
             event: WindowEvent::CloseRequested,

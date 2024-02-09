@@ -1,0 +1,12 @@
+[package]
+name = "sovereign_gltf"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytemuck = "1"
+glam = "0.25"
+gltf = "1"
+sovereign_render = { path = "../sovereign_render" }

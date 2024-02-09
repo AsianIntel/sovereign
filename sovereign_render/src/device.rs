@@ -5,7 +5,7 @@ use gpu_allocator::{
     },
     MemoryLocation,
 };
-use std::{error::Error, ffi::c_void, ptr, sync::Arc};
+use std::{error::Error, ffi::c_void, mem::MaybeUninit, ptr, sync::Arc};
 use windows::{
     core::{ComInterface, PCSTR},
     Win32::{
@@ -13,15 +13,12 @@ use windows::{
         Graphics::{
             Direct3D::*,
             Direct3D12::*,
-            Dxgi::{
-                Common::{DXGI_FORMAT, DXGI_FORMAT_D32_FLOAT, DXGI_SAMPLE_DESC},
-                *,
-            },
+            Dxgi::{Common::*, *},
         },
     },
 };
 
-use crate::{command_encoder::CommandEncoder, descriptor::DescriptorHeap, queue::Queue};
+use crate::{command_encoder::CommandEncoder, descriptor::DescriptorHeap, id::{BufferId, ImageId}, queue::Queue};
 
 pub type DeviceError = Box<dyn Error>;
 
@@ -31,10 +28,20 @@ pub struct Device {
     device: Arc<ID3D12Device>,
     allocator: Allocator,
     debug_callback: ID3D12InfoQueue1,
+
+    images: Vec<AllocatedImage>,
+    buffers: Vec<AllocatedBuffer>,
 }
 
 pub struct AllocatedImage {
     pub allocation: Resource,
+    pub width: u32,
+    pub height: u32
+}
+
+pub struct AllocatedBuffer {
+    pub allocation: Resource,
+    pub size: u64
 }
 
 impl Device {
@@ -95,7 +102,17 @@ impl Device {
             device: Arc::new(device),
             allocator,
             debug_callback: info_queue,
+            images: Vec::new(),
+            buffers: Vec::new(),
         })
+    }
+
+    pub fn get_image(&self, image_id: ImageId) -> &AllocatedImage {
+        &self.images[image_id.0]
+    }
+
+    pub fn get_buffer(&self, buffer_id: BufferId) -> &AllocatedBuffer {
+        &self.buffers[buffer_id.0]
     }
 
     pub fn create_command_queue(
@@ -158,7 +175,7 @@ impl Device {
         format: DXGI_FORMAT,
         flags: D3D12_RESOURCE_FLAGS,
         state: D3D12_RESOURCE_STATES,
-    ) -> Result<AllocatedImage, DeviceError> {
+    ) -> Result<ImageId, DeviceError> {
         let resource_category = if format == DXGI_FORMAT_D32_FLOAT {
             ResourceCategory::RtvDsvTexture
         } else {
@@ -188,7 +205,50 @@ impl Device {
             initial_state_or_layout: ResourceStateOrBarrierLayout::ResourceState(state),
             resource_type: &ResourceType::Placed,
         })?;
-        Ok(AllocatedImage { allocation })
+
+        let idx = self.images.len();
+        self.images.push(AllocatedImage { allocation, width, height });
+
+        Ok(ImageId(idx))
+    }
+
+    pub fn create_buffer(
+        &mut self,
+        size: u64,
+        format: DXGI_FORMAT,
+        flags: D3D12_RESOURCE_FLAGS,
+        state: D3D12_RESOURCE_STATES,
+        location: MemoryLocation,
+    ) -> Result<BufferId, DeviceError> {
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Alignment: 0,
+            Width: size,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: flags,
+        };
+        let allocation = self.allocator.create_resource(&ResourceCreateDesc {
+            name: "Buffer",
+            memory_location: location,
+            resource_category: ResourceCategory::Buffer,
+            resource_desc: &desc,
+            clear_value: None,
+            initial_state_or_layout: ResourceStateOrBarrierLayout::ResourceState(state),
+            resource_type: &ResourceType::Placed,
+        })?;
+
+        let idx = self.buffers.len();
+        self.buffers.push(AllocatedBuffer { allocation, size });
+
+        Ok(BufferId(idx))
     }
 
     pub fn create_command_encoder(
@@ -206,9 +266,12 @@ impl Device {
     pub fn create_root_signature(
         &self,
         flags: D3D12_ROOT_SIGNATURE_FLAGS,
+        parameters: &[D3D12_ROOT_PARAMETER],
     ) -> Result<ID3D12RootSignature, DeviceError> {
         let desc = D3D12_ROOT_SIGNATURE_DESC {
             Flags: flags,
+            NumParameters: parameters.len() as u32,
+            pParameters: parameters.as_ptr(),
             ..Default::default()
         };
         let mut signature = None;
@@ -240,6 +303,37 @@ impl Device {
     pub fn create_fence(&self) -> Result<ID3D12Fence, DeviceError> {
         let fence = unsafe { self.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }?;
         Ok(fence)
+    }
+
+    pub fn map_buffer<T>(&self, id: BufferId) -> Result<&mut [T], DeviceError> {
+        let mut data = MaybeUninit::uninit();
+        let buffer = &self.buffers[id.0];
+        unsafe {
+            buffer
+                .allocation
+                .resource()
+                .Map(0, None, Some(data.as_mut_ptr()))?;
+            let slice = std::slice::from_raw_parts_mut(data.assume_init() as *mut T, buffer.size as usize / std::mem::size_of::<T>());
+            Ok(slice)
+        }
+    }
+
+    pub fn unmap_buffer(&self, id: BufferId) {
+        unsafe {
+            self.buffers[id.0].allocation.resource().Unmap(0, None);
+        }
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        for image in self.images.drain(..) {
+            let _ = self.allocator.free_resource(image.allocation);
+        }
+
+        for buffer in self.buffers.drain(..) {
+            let _ = self.allocator.free_resource(buffer.allocation);
+        }
     }
 }
 
@@ -279,5 +373,5 @@ unsafe extern "system" fn message_callback(
     description: PCSTR,
     _context: *mut c_void,
 ) {
-    tracing::info!("{}", description.display());
+    tracing::warn!("{}", description.display());
 }

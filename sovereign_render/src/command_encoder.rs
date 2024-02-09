@@ -3,9 +3,14 @@ use windows::{
     core::ComInterface,
     Win32::{
         Foundation::RECT,
-        Graphics::{Direct3D::D3D_PRIMITIVE_TOPOLOGY, Direct3D12::*},
+        Graphics::{
+            Direct3D::D3D_PRIMITIVE_TOPOLOGY, Direct3D12::*,
+            Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
+        },
     },
 };
+
+use crate::device::{AllocatedBuffer, AllocatedImage};
 
 pub struct CommandEncoder {
     allocator: ID3D12CommandAllocator,
@@ -26,9 +31,21 @@ impl CommandEncoder {
         Ok(())
     }
 
+    pub fn set_descriptor_heaps(&self, heaps: &[Option<ID3D12DescriptorHeap>]) {
+        unsafe {
+            self.list.SetDescriptorHeaps(heaps);
+        }
+    }
+
     pub fn set_root_signature(&self, root_signature: &ID3D12RootSignature) {
         unsafe {
             self.list.SetGraphicsRootSignature(root_signature);
+        }
+    }
+
+    pub fn set_pipeline(&self, pipeline: &ID3D12PipelineState) {
+        unsafe {
+            self.list.SetPipelineState(pipeline);
         }
     }
 
@@ -122,5 +139,34 @@ impl CommandEncoder {
         }
 
         Ok(self.list.cast()?)
+    }
+
+    pub fn copy_buffer_to_image(&self, buffer: &AllocatedBuffer, image: &AllocatedImage) {
+        let src = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: unsafe { std::mem::transmute_copy(buffer.allocation.resource()) },
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                    Offset: 0,
+                    Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                        Width: image.width,
+                        Height: image.height,
+                        Depth: 1,
+                        RowPitch: image.width * 4,
+                    },
+                },
+            },
+        };
+        let dst = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: unsafe { std::mem::transmute_copy(image.allocation.resource()) },
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: 0,
+            },
+        };
+        unsafe {
+            self.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+        }
     }
 }

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use windows::Win32::Graphics::Direct3D12::{
-    ID3D12DescriptorHeap, ID3D12Device, ID3D12Resource, D3D12_CPU_DESCRIPTOR_HANDLE,
+    ID3D12DescriptorHeap, ID3D12Device, ID3D12Resource, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_SAMPLER_DESC
 };
+
+use crate::{device::AllocatedImage, id::SamplerId};
 
 pub struct DescriptorHeap {
     heap: ID3D12DescriptorHeap,
@@ -22,6 +24,10 @@ impl DescriptorHeap {
             descriptor_size,
             items: 0,
         }
+    }
+
+    pub fn get(&self) -> ID3D12DescriptorHeap {
+        self.heap.clone()
     }
 
     pub fn get_handle(&self, idx: usize) -> D3D12_CPU_DESCRIPTOR_HANDLE {
@@ -46,11 +52,11 @@ impl DescriptorHeap {
         self.items += 1;
     }
 
-    pub fn create_dsv(&mut self, resource: &ID3D12Resource) {
+    pub fn create_dsv(&mut self, image: &AllocatedImage) {
         let idx = self.items;
         unsafe {
             self.device.CreateDepthStencilView(
-                resource,
+                image.allocation.resource(),
                 None,
                 D3D12_CPU_DESCRIPTOR_HANDLE {
                     ptr: self.heap.GetCPUDescriptorHandleForHeapStart().ptr
@@ -59,5 +65,17 @@ impl DescriptorHeap {
             );
         }
         self.items += 1;
+    }
+
+    pub fn create_sampler(&mut self, sampler: &D3D12_SAMPLER_DESC) -> SamplerId {
+        let idx = self.items;
+        unsafe {
+            self.device.CreateSampler(sampler, D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: self.heap.GetCPUDescriptorHandleForHeapStart().ptr
+                    + idx * self.descriptor_size as usize,
+            });
+        }
+        self.items += 1;
+        SamplerId(idx)
     }
 }

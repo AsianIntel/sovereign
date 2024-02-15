@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "sovereign", "sovereign_gltf",
+    "sovereign", 
+    "sovereign_ecs", 
+    "sovereign_gltf",
     "sovereign_render"
 ]
 

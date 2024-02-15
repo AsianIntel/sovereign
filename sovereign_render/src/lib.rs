@@ -1,3 +1,5 @@
+pub mod asset;
+pub mod camera;
 mod command_encoder;
 mod descriptor;
 mod device;
@@ -5,15 +7,23 @@ pub mod id;
 pub mod material;
 pub mod mesh;
 mod queue;
+pub mod transform;
 
+use asset::{Assets, Handle};
+use camera::ViewUniform;
 use command_encoder::CommandEncoder;
 use descriptor::DescriptorHeap;
 use device::Device;
+use glam::{Mat4, Vec3};
 use hassle_rs::{compile_hlsl, fake_sign_dxil_in_place};
-use id::ImageId;
+use id::{BufferId, ImageId, ViewId};
+use material::{GPUMaterial, Material, MaterialUniform};
+use mesh::{GPUMesh, Mesh, Vertex};
 use queue::Queue;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use sovereign_ecs::{CommandBuffer, PreparedQuery, World};
 use std::error::Error;
+use transform::{GPUTransform, GlobalTransform};
 use windows::Win32::{
     Foundation::{HANDLE, HWND},
     System::Threading::{CreateEventA, WaitForSingleObject},
@@ -25,6 +35,22 @@ pub use windows::Win32::Graphics::{
     Direct3D12::*,
     Dxgi::{Common::*, *},
 };
+
+#[derive(Debug)]
+pub struct RenderResources {
+    pub vertex_buffer_id: u32,
+    pub transform_buffer_id: u32,
+    pub transform_offset: u32,
+    pub view_buffer_index: u32,
+    pub material_buffer_index: u32,
+    pub material_offset: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BufferView {
+    pub buffer: BufferId,
+    pub view: ViewId,
+}
 
 pub struct Renderer {
     width: u32,
@@ -50,6 +76,18 @@ pub struct Renderer {
     fence_event: HANDLE,
 
     pub checkerboard_image: ImageId,
+
+    view_buffer: BufferView,
+    transform_buffer: BufferView,
+    material_buffer: BufferView,
+    mesh_query: PreparedQuery<(
+        &'static GPUMesh,
+        &'static GPUMaterial,
+        &'static GPUTransform,
+    )>,
+    prepare_mesh_query: PreparedQuery<(&'static Handle<Mesh>,)>,
+    prepare_transform_query: PreparedQuery<(&'static GlobalTransform,)>,
+    prepare_material_query: PreparedQuery<(&'static Handle<Material>,)>,
 }
 
 impl Renderer {
@@ -57,6 +95,7 @@ impl Renderer {
         width: u32,
         height: u32,
         window: &dyn HasWindowHandle,
+        world: &mut World,
     ) -> Result<Self, Box<dyn Error>> {
         let mut device = Device::new()?;
         let graphics_queue = device.create_command_queue(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
@@ -90,7 +129,7 @@ impl Renderer {
             1,
             D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
         )?;
-        let cbv_heap = device.create_descriptor_heap(
+        let mut cbv_heap = device.create_descriptor_heap(
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
             1000,
             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
@@ -137,7 +176,8 @@ impl Renderer {
                 Constants: D3D12_ROOT_CONSTANTS {
                     ShaderRegister: 0,
                     RegisterSpace: 0,
-                    Num32BitValues: 5,
+                    Num32BitValues: (std::mem::size_of::<RenderResources>()
+                        / std::mem::size_of::<u32>()) as u32,
                 },
             },
         };
@@ -210,6 +250,108 @@ impl Renderer {
 
         let frame_index = unsafe { swapchain.GetCurrentBackBufferIndex() } as usize;
 
+        let view = ViewUniform {
+            projection: Mat4::perspective_lh(
+                60.0f32.to_radians(),
+                width as f32 / height as f32,
+                10000.0,
+                0.0001,
+            ),
+            view: Mat4::look_at_lh(Vec3::new(-0.01, 0.005, -0.005), Vec3::ZERO, Vec3::Y),
+        };
+        let view_buffer = device.create_buffer(
+            256,
+            DXGI_FORMAT_UNKNOWN,
+            D3D12_RESOURCE_FLAG_NONE,
+            D3D12_RESOURCE_STATE_COMMON,
+            MemoryLocation::CpuToGpu,
+        )?;
+        {
+            let data = device.map_buffer::<ViewUniform>(view_buffer)?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &view as *const _ as *const u8,
+                    data.as_ptr(),
+                    std::mem::size_of::<ViewUniform>(),
+                )
+            };
+            device.unmap_buffer(view_buffer);
+        }
+        let view_buffer_resource = device.get_buffer(view_buffer);
+        let view_buffer_view_desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
+            BufferLocation: unsafe {
+                view_buffer_resource
+                    .allocation
+                    .resource()
+                    .GetGPUVirtualAddress()
+                    + view_buffer_resource
+                        .allocation
+                        .allocation
+                        .as_ref()
+                        .unwrap()
+                        .offset()
+            },
+            SizeInBytes: device.get_buffer(view_buffer).size as u32,
+        };
+        let view_buffer_view = cbv_heap.create_cbv(&view_buffer_view_desc);
+
+        let transform_buffer = device.create_buffer(
+            std::mem::size_of::<GlobalTransform>() as u64 * 1000,
+            DXGI_FORMAT_UNKNOWN,
+            D3D12_RESOURCE_FLAG_NONE,
+            D3D12_RESOURCE_STATE_COMMON,
+            MemoryLocation::CpuToGpu,
+        )?;
+        let transform_buffer_view_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 0,
+                    NumElements: 1000,
+                    StructureByteStride: std::mem::size_of::<GlobalTransform>() as u32,
+                    Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                },
+            },
+        };
+        let transform_buffer_view = cbv_heap.create_srv(
+            device.get_buffer(transform_buffer).allocation.resource(),
+            &transform_buffer_view_desc,
+        );
+
+        let material_buffer = device.create_buffer(
+            std::mem::size_of::<MaterialUniform>() as u64 * 200,
+            DXGI_FORMAT_UNKNOWN,
+            D3D12_RESOURCE_FLAG_NONE,
+            D3D12_RESOURCE_STATE_COMMON,
+            MemoryLocation::CpuToGpu,
+        )?;
+        let material_buffer_view_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 0,
+                    NumElements: 100,
+                    StructureByteStride: std::mem::size_of::<MaterialUniform>() as u32,
+                    Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                },
+            },
+        };
+        let material_buffer_view = cbv_heap.create_srv(
+            device.get_buffer(material_buffer).allocation.resource(),
+            &material_buffer_view_desc,
+        );
+
+        world.set_singleton(Assets::<Mesh>::new());
+        world.set_singleton(Assets::<Material>::new());
+        let mesh_query = PreparedQuery::new();
+        let prepare_mesh_query = PreparedQuery::new();
+        let prepare_transform_query = PreparedQuery::new();
+        let prepare_material_query = PreparedQuery::new();
+
         let mut renderer = Self {
             width,
             height,
@@ -230,6 +372,22 @@ impl Renderer {
             fence_event,
             fence_value,
             checkerboard_image: ImageId(0),
+            view_buffer: BufferView {
+                buffer: view_buffer,
+                view: view_buffer_view,
+            },
+            transform_buffer: BufferView {
+                buffer: transform_buffer,
+                view: transform_buffer_view,
+            },
+            material_buffer: BufferView {
+                buffer: material_buffer,
+                view: material_buffer_view,
+            },
+            mesh_query,
+            prepare_mesh_query,
+            prepare_transform_query,
+            prepare_material_query,
         };
 
         let magenta = 0xFFFF00FFu32;
@@ -265,19 +423,179 @@ impl Renderer {
             .unwrap();
         {
             let data = renderer.device.map_buffer::<u8>(buffer_id)?;
-            data.copy_from_slice(bytemuck::cast_slice(&pixels));
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    pixels.as_ptr() as *const u8,
+                    data.as_ptr(),
+                    std::mem::size_of::<u32>() * pixels.len(),
+                )
+            };
             renderer.device.unmap_buffer(buffer_id);
         }
         renderer.immediate_submit(|r, encoder| {
             let buffer = r.device.get_buffer(buffer_id);
             let error_checkboard_image = r.device.get_image(error_checkboard_image_id);
             encoder.copy_buffer_to_image(buffer, error_checkboard_image);
+            encoder.transition_image(
+                error_checkboard_image.allocation.resource(),
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            );
         })?;
 
         Ok(renderer)
     }
 
-    pub fn render(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn prepare(&mut self, world: &mut World) -> Result<(), Box<dyn Error>> {
+        let mut meshes_query = world.get_singleton::<Assets<Mesh>>();
+        let (meshes,) = meshes_query.get().unwrap();
+
+        let mut materials_query = world.get_singleton::<Assets<Material>>();
+        let (materials,) = materials_query.get().unwrap();
+
+        let mut commands = CommandBuffer::new();
+        self.prepare_mesh_query
+            .query(world.get())
+            .iter()
+            .for_each(|(entity, (mesh_handle,))| {
+                let mesh = meshes.get(*mesh_handle).unwrap();
+                let vertex_buffer = self
+                    .device
+                    .create_buffer(
+                        mesh.vertices.len() as u64 * std::mem::size_of::<Vertex>() as u64,
+                        DXGI_FORMAT_UNKNOWN,
+                        D3D12_RESOURCE_FLAG_NONE,
+                        D3D12_RESOURCE_STATE_COMMON,
+                        MemoryLocation::CpuToGpu,
+                    )
+                    .unwrap();
+                {
+                    let data = self.device.map_buffer::<Vertex>(vertex_buffer).unwrap();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            mesh.vertices.as_ptr() as *const u8,
+                            data.as_ptr(),
+                            std::mem::size_of::<Vertex>() * mesh.vertices.len(),
+                        )
+                    };
+                    self.device.unmap_buffer(vertex_buffer);
+                }
+                let vbv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT_UNKNOWN,
+                    ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Buffer: D3D12_BUFFER_SRV {
+                            FirstElement: 0,
+                            NumElements: mesh.vertices.len() as u32,
+                            StructureByteStride: std::mem::size_of::<Vertex>() as u32,
+                            Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                        },
+                    },
+                };
+                let vbv = self.cbv_heap.create_srv(
+                    self.device.get_buffer(vertex_buffer).allocation.resource(),
+                    &vbv_desc,
+                );
+                let index_buffer = self
+                    .device
+                    .create_buffer(
+                        mesh.indices.len() as u64 * std::mem::size_of::<u32>() as u64,
+                        DXGI_FORMAT_UNKNOWN,
+                        D3D12_RESOURCE_FLAG_NONE,
+                        D3D12_RESOURCE_STATE_INDEX_BUFFER,
+                        MemoryLocation::CpuToGpu,
+                    )
+                    .unwrap();
+                {
+                    let data = self.device.map_buffer::<u32>(index_buffer).unwrap();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            mesh.indices.as_ptr() as *const u8,
+                            data.as_ptr(),
+                            std::mem::size_of::<u32>() * mesh.indices.len(),
+                        )
+                    };
+                    self.device.unmap_buffer(index_buffer);
+                }
+                commands.insert_one(
+                    entity,
+                    GPUMesh {
+                        vertex_buffer: BufferView {
+                            buffer: vertex_buffer,
+                            view: vbv,
+                        },
+                        index_buffer,
+                        index_count: mesh.indices.len(),
+                    },
+                );
+            });
+
+        let transform_data = self
+            .device
+            .map_buffer::<GlobalTransform>(self.transform_buffer.buffer)
+            .unwrap();
+        self.prepare_transform_query
+            .query(world.get())
+            .iter()
+            .enumerate()
+            .for_each(|(idx, (entity, (transform,)))| {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        transform as *const _ as *const u8,
+                        transform_data
+                            .as_ptr()
+                            .offset((idx * std::mem::size_of::<GlobalTransform>()) as isize),
+                        std::mem::size_of::<GlobalTransform>(),
+                    )
+                };
+                commands.insert_one(
+                    entity,
+                    GPUTransform {
+                        buffer: self.transform_buffer,
+                        offset: idx,
+                    },
+                )
+            });
+        self.device.unmap_buffer(self.transform_buffer.buffer);
+
+        let material_data = self
+            .device
+            .map_buffer::<MaterialUniform>(self.material_buffer.buffer)
+            .unwrap();
+        self.prepare_material_query
+            .query(world.get())
+            .iter()
+            .enumerate()
+            .for_each(|(idx, (entity, (material_idx,)))| {
+                let material = materials.get(*material_idx).unwrap();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        &material.uniform as *const _ as *const u8,
+                        material_data
+                            .as_ptr()
+                            .offset((idx * std::mem::size_of::<MaterialUniform>()) as isize),
+                        std::mem::size_of::<MaterialUniform>(),
+                    )
+                };
+                commands.insert_one(
+                    entity,
+                    GPUMaterial {
+                        buffer: self.material_buffer,
+                        offset: idx,
+                    },
+                );
+            });
+        self.device.unmap_buffer(self.material_buffer.buffer);
+
+        drop(meshes_query);
+        drop(materials_query);
+
+        commands.run_on(world.get_mut());
+        Ok(())
+    }
+
+    pub fn render(&mut self, world: &World) -> Result<(), Box<dyn Error>> {
         self.render_command_encoder.reset()?;
 
         self.render_command_encoder
@@ -304,10 +622,43 @@ impl Renderer {
         self.render_command_encoder
             .clear_render_target(rtv_handle, &[0.0, 0.0, 0.0, 1.0]);
         self.render_command_encoder
-            .clear_depth_target(dsv_handle, 1.0);
+            .clear_depth_target(dsv_handle, 0.0);
 
         self.render_command_encoder
             .set_primitive_topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        self.mesh_query.query(world.get()).iter().for_each(
+            |(_entity, (mesh, material, transform))| {
+                let render_resources = RenderResources {
+                    vertex_buffer_id: mesh.vertex_buffer.view.0 as u32,
+                    transform_buffer_id: transform.buffer.view.0 as u32,
+                    transform_offset: transform.offset as u32,
+                    view_buffer_index: self.view_buffer.view.0 as u32,
+                    material_buffer_index: material.buffer.view.0 as u32,
+                    material_offset: material.offset as u32,
+                };
+                self.render_command_encoder
+                    .set_root_constants(&render_resources);
+                self.render_command_encoder
+                    .bind_index_buffer(&D3D12_INDEX_BUFFER_VIEW {
+                        BufferLocation: unsafe {
+                            self.device
+                                .get_buffer(mesh.index_buffer)
+                                .allocation
+                                .resource()
+                                .GetGPUVirtualAddress()
+                        },
+                        SizeInBytes: (mesh.index_count * std::mem::size_of::<u32>()) as u32,
+                        Format: DXGI_FORMAT_R32_UINT,
+                    });
+                self.render_command_encoder.draw_indexed_instanced(
+                    mesh.index_count as u32,
+                    1,
+                    0,
+                    0,
+                );
+            },
+        );
 
         self.render_command_encoder.transition_image(
             &self.render_targets[self.frame_index],

@@ -6,3 +6,6 @@ pub struct ImageId(pub usize);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BufferId(pub usize);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ViewId(pub usize);

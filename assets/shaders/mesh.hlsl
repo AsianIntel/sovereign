@@ -6,10 +6,11 @@ struct PSInput {
 };
 
 struct Vertex {
-    float3 position;
-    float3 normal;
-    float2 uv;
+    float4 position;
+    float4 normal;
     float4 color;
+    float2 uv;
+    float2 pad;
 };
 
 struct Transform {
@@ -19,12 +20,12 @@ struct Transform {
 struct ViewUniform {
     float4x4 projection;
     float4x4 view;
-    float3 position;
 };
 
 struct Material {
     float4 base_color_factors;
     float2 metal_rough_factors;
+    float2 pad;
 };
 
 struct RenderResources {
@@ -33,6 +34,7 @@ struct RenderResources {
     uint transformOffset;
     uint viewBufferIndex;
     uint materialBufferIndex;
+    uint materialOffset;
 };
 
 ConstantBuffer<RenderResources> renderResource: register(b0);
@@ -46,7 +48,7 @@ PSInput VSMain(uint vertexID: SV_VertexID) {
     float4x4 view = viewBuffer.view;
     float4x4 projection = viewBuffer.projection;
 
-    float4 pos = float4(vertexBuffer[vertexID].position, 1.0f);
+    float4 pos = float4(vertexBuffer[vertexID].position.xyz, 1.0f);
     pos = mul(model, pos);
     pos = mul(view, pos);
     pos = mul(projection, pos);
@@ -61,9 +63,8 @@ PSInput VSMain(uint vertexID: SV_VertexID) {
 
 float4 PSMain(PSInput input): SV_Target {
     StructuredBuffer<Material> materialBuffer = ResourceDescriptorHeap[renderResource.materialBufferIndex];
-    ConstantBuffer<ViewUniform> viewBuffer = ResourceDescriptorHeap[renderResource.viewBufferIndex];
 
-    Material material = materialBuffer[0];
+    Material material = materialBuffer[renderResource.materialOffset];
 
     float4 result = material.base_color_factors * input.color;
 

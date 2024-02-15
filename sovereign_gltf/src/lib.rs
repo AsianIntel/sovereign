@@ -3,10 +3,12 @@ use gltf::{
     scene::Transform,
     texture::{MinFilter, WrappingMode},
 };
+use sovereign_ecs::World;
 use sovereign_render::{
+    asset::{Assets, Handle},
     id::{ImageId, SamplerId},
     material::{Material, MaterialUniform},
-    mesh::Vertex,
+    mesh::{Mesh, Vertex},
     *,
 };
 use std::{error::Error, path::Path};
@@ -15,7 +17,7 @@ use std::{error::Error, path::Path};
 pub struct Gltf {
     pub samplers: Vec<SamplerId>,
     pub images: Vec<ImageId>,
-    pub materials: Vec<Material>,
+    pub materials: Vec<Handle<Material>>,
     pub meshes: Vec<GltfMesh>,
     pub nodes: Vec<GltfNode>,
     pub top_nodes: Vec<usize>,
@@ -23,8 +25,7 @@ pub struct Gltf {
 
 #[derive(Debug)]
 pub struct GltfMesh {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
+    pub mesh: Handle<Mesh>,
     pub material_idx: usize,
 }
 
@@ -36,8 +37,18 @@ pub struct GltfNode {
     pub children: Vec<usize>,
 }
 
-pub fn load_gltf(renderer: &mut Renderer, path: &Path) -> Result<Gltf, Box<dyn Error>> {
-    let (document, buffers, images) = gltf::import(path)?;
+pub fn load_gltf(
+    renderer: &mut Renderer,
+    world: &mut World,
+    path: &Path,
+) -> Result<Gltf, Box<dyn Error>> {
+    let (document, buffers, _images) = gltf::import(path)?;
+
+    let mut meshes_query = world.get_singleton::<Assets<Mesh>>();
+    let (asset_meshes,) = meshes_query.get().unwrap();
+
+    let mut materials_query = world.get_singleton::<Assets<Material>>();
+    let (asset_materials,) = materials_query.get().unwrap();
 
     let mut samplers = Vec::new();
     let mut images = Vec::new();
@@ -63,17 +74,6 @@ pub fn load_gltf(renderer: &mut Renderer, path: &Path) -> Result<Gltf, Box<dyn E
         images.push(renderer.checkerboard_image);
     }
 
-    let material_buffer = renderer.device.create_buffer(
-        (document.materials().len() * std::mem::size_of::<MaterialUniform>()) as u64,
-        DXGI_FORMAT_UNKNOWN,
-        D3D12_RESOURCE_FLAG_NONE,
-        D3D12_RESOURCE_STATE_COMMON,
-        MemoryLocation::CpuToGpu,
-    )?;
-    let material_data = renderer
-        .device
-        .map_buffer::<MaterialUniform>(material_buffer)?;
-    let mut idx = 0;
     for material in document.materials() {
         let uniform = MaterialUniform {
             base_color_factors: Vec4::from_array(
@@ -83,8 +83,8 @@ pub fn load_gltf(renderer: &mut Renderer, path: &Path) -> Result<Gltf, Box<dyn E
                 material.pbr_metallic_roughness().metallic_factor(),
                 material.pbr_metallic_roughness().roughness_factor(),
             ),
+            pad: Vec2::ZERO,
         };
-        material_data[idx] = uniform.clone();
 
         let (color_image, color_sampler) = if let Some(base_color_texture) =
             material.pbr_metallic_roughness().base_color_texture()
@@ -96,17 +96,12 @@ pub fn load_gltf(renderer: &mut Renderer, path: &Path) -> Result<Gltf, Box<dyn E
             (None, None)
         };
 
-        materials.push(Material {
+        materials.push(asset_materials.push(Material {
             uniform,
-            buffer: material_buffer,
-            offset: idx,
             color_image,
             color_sampler,
-        });
-
-        idx += 1;
+        }));
     }
-    renderer.device.unmap_buffer(material_buffer);
 
     for gltf_mesh in document.meshes() {
         for primitive in gltf_mesh.primitives() {
@@ -115,24 +110,23 @@ pub fn load_gltf(renderer: &mut Renderer, path: &Path) -> Result<Gltf, Box<dyn E
             let positions = reader
                 .read_positions()
                 .unwrap()
-                .map(|p| Vec3::from_array(p))
+                .map(|p| Vec4::new(p[0], p[1], p[2], 1.0))
                 .collect::<Vec<_>>();
             let normals = reader
                 .read_normals()
                 .unwrap()
-                .map(|n| Vec3::from_array(n))
+                .map(|n| Vec4::new(n[0], n[1], n[2], 1.0))
                 .collect::<Vec<_>>();
             let colors = reader.read_colors(0).map(|c| {
                 c.into_rgba_f32()
                     .map(|c| Vec4::from_array(c))
                     .collect::<Vec<_>>()
             });
-            let uvs = reader
-                .read_tex_coords(0)
-                .unwrap()
-                .into_f32()
-                .map(|u| Vec2::from_array(u))
-                .collect::<Vec<_>>();
+            let uvs = reader.read_tex_coords(0).map(|u| {
+                u.into_f32()
+                    .map(|u| Vec2::from_array(u))
+                    .collect::<Vec<_>>()
+            });
 
             let indices = reader
                 .read_indices()
@@ -145,14 +139,14 @@ pub fn load_gltf(renderer: &mut Renderer, path: &Path) -> Result<Gltf, Box<dyn E
                     position: positions[i],
                     normal: normals[i],
                     color: colors.as_ref().map(|c| c[i]).unwrap_or_else(|| Vec4::ONE),
-                    uv: uvs[i],
+                    uv: uvs.as_ref().map(|u| u[i]).unwrap_or_else(|| Vec2::ZERO),
+                    pad: Vec2::ZERO,
                 });
             }
 
             meshes.push(GltfMesh {
-                vertices,
-                indices,
-                material_idx: primitive.material().index().unwrap(),
+                mesh: asset_meshes.push(Mesh { vertices, indices }),
+                material_idx: primitive.material().index().unwrap_or(0),
             });
         }
     }

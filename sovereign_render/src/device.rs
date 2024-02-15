@@ -5,7 +5,12 @@ use gpu_allocator::{
     },
     MemoryLocation,
 };
-use std::{error::Error, ffi::c_void, mem::MaybeUninit, ptr, sync::Arc};
+use std::{
+    error::Error,
+    ffi::c_void,
+    ptr::{self, NonNull},
+    sync::Arc,
+};
 use windows::{
     core::{ComInterface, PCSTR},
     Win32::{
@@ -18,16 +23,21 @@ use windows::{
     },
 };
 
-use crate::{command_encoder::CommandEncoder, descriptor::DescriptorHeap, id::{BufferId, ImageId}, queue::Queue};
+use crate::{
+    command_encoder::CommandEncoder,
+    descriptor::DescriptorHeap,
+    id::{BufferId, ImageId},
+    queue::Queue,
+};
 
 pub type DeviceError = Box<dyn Error>;
 
 pub struct Device {
     factory: IDXGIFactory6,
-    physical_device: IDXGIAdapter1,
+    _physical_device: IDXGIAdapter1,
     device: Arc<ID3D12Device>,
     allocator: Allocator,
-    debug_callback: ID3D12InfoQueue1,
+    _debug_callback: ID3D12InfoQueue1,
 
     images: Vec<AllocatedImage>,
     buffers: Vec<AllocatedBuffer>,
@@ -36,12 +46,12 @@ pub struct Device {
 pub struct AllocatedImage {
     pub allocation: Resource,
     pub width: u32,
-    pub height: u32
+    pub height: u32,
 }
 
 pub struct AllocatedBuffer {
     pub allocation: Resource,
-    pub size: u64
+    pub size: u64,
 }
 
 impl Device {
@@ -52,6 +62,7 @@ impl Device {
                 D3D12GetDebugInterface(&mut debug)?;
                 if let Some(debug) = debug {
                     debug.EnableDebugLayer();
+                    debug.SetEnableGPUBasedValidation(true);
                 }
             }
         }
@@ -98,10 +109,10 @@ impl Device {
 
         Ok(Self {
             factory,
-            physical_device,
+            _physical_device: physical_device,
             device: Arc::new(device),
             allocator,
-            debug_callback: info_queue,
+            _debug_callback: info_queue,
             images: Vec::new(),
             buffers: Vec::new(),
         })
@@ -207,7 +218,11 @@ impl Device {
         })?;
 
         let idx = self.images.len();
-        self.images.push(AllocatedImage { allocation, width, height });
+        self.images.push(AllocatedImage {
+            allocation,
+            width,
+            height,
+        });
 
         Ok(ImageId(idx))
     }
@@ -305,16 +320,13 @@ impl Device {
         Ok(fence)
     }
 
-    pub fn map_buffer<T>(&self, id: BufferId) -> Result<&mut [T], DeviceError> {
-        let mut data = MaybeUninit::uninit();
+    pub fn map_buffer<T>(&self, id: BufferId) -> Result<NonNull<u8>, DeviceError> {
+        let mut data = ptr::null_mut();
         let buffer = &self.buffers[id.0];
         unsafe {
-            buffer
-                .allocation
-                .resource()
-                .Map(0, None, Some(data.as_mut_ptr()))?;
-            let slice = std::slice::from_raw_parts_mut(data.assume_init() as *mut T, buffer.size as usize / std::mem::size_of::<T>());
-            Ok(slice)
+            buffer.allocation.resource().Map(0, None, Some(&mut data))?;
+            let ptr = NonNull::new(data.cast::<u8>()).unwrap();
+            Ok(ptr)
         }
     }
 

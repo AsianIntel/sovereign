@@ -133,6 +133,41 @@ impl CommandEncoder {
         }
     }
 
+    pub fn set_root_constants<T>(&self, constants: &T) {
+        unsafe {
+            self.list.SetGraphicsRoot32BitConstants(
+                0,
+                std::mem::size_of::<T>() as u32 / std::mem::size_of::<u32>() as u32,
+                constants as *const _ as *const _,
+                0,
+            );
+        }
+    }
+
+    pub fn bind_index_buffer(&self, index_buffer: *const D3D12_INDEX_BUFFER_VIEW) {
+        unsafe {
+            self.list.IASetIndexBuffer(Some(index_buffer));
+        }
+    }
+
+    pub fn draw_indexed_instanced(
+        &self,
+        index_count: u32,
+        instance_count: u32,
+        start_index: u32,
+        start_instance: u32,
+    ) {
+        unsafe {
+            self.list.DrawIndexedInstanced(
+                index_count,
+                instance_count,
+                start_index,
+                0,
+                start_instance,
+            );
+        }
+    }
+
     pub fn finish(&self) -> Result<ID3D12CommandList, Box<dyn Error>> {
         unsafe {
             self.list.Close()?;

@@ -9,4 +9,6 @@ edition = "2021"
 bytemuck = "1"
 glam = "0.25"
 gltf = "1"
+sovereign_ecs = { path = "../sovereign_ecs" }
 sovereign_render = { path = "../sovereign_render" }
+tracing = "0.1"

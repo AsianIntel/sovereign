@@ -6,8 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bytemuck = "1"
-glam = "0.25"
+bytemuck = { version = "1", features = ["derive"] }
+sovereign_ecs = { path = "../sovereign_ecs" }
+glam = { version = "0.25", features = ["bytemuck"] }
 gpu-allocator = { version = "0.25", default-features = false, features = ["d3d12"] }
 hassle-rs = "0.11"
 raw-window-handle = "0.6"

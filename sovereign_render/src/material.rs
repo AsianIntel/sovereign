@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use glam::{Vec2, Vec4};
+use glam::Vec4;
 
 use crate::{
     id::{ImageId, SamplerId},
@@ -17,8 +17,10 @@ pub struct Material {
 #[repr(C)]
 pub struct MaterialUniform {
     pub base_color_factors: Vec4,
-    pub metal_rough_factors: Vec2,
-    pub pad: Vec2,
+    pub perceptual_roughness: f32,
+    pub metallic: f32,
+    pub reflectance: f32,
+    pub pad: f32,
 }
 
 pub struct GPUMaterial {

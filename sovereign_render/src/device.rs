@@ -37,7 +37,7 @@ pub struct Device {
     _physical_device: IDXGIAdapter1,
     device: Arc<ID3D12Device>,
     allocator: Allocator,
-    _debug_callback: ID3D12InfoQueue1,
+    _debug_callback: Option<ID3D12InfoQueue1>,
 
     images: Vec<AllocatedImage>,
     buffers: Vec<AllocatedBuffer>,
@@ -83,29 +83,31 @@ impl Device {
         })?;
 
         let mut info_queue: Option<ID3D12InfoQueue1> = None;
-        unsafe { device.query(&ID3D12InfoQueue1::IID, &mut info_queue as *mut _ as *mut _) }
-            .ok()?;
-        let info_queue = info_queue.unwrap();
-        let mut ids = vec![D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE];
-        unsafe {
-            info_queue.AddStorageFilterEntries(&D3D12_INFO_QUEUE_FILTER {
-                DenyList: D3D12_INFO_QUEUE_FILTER_DESC {
-                    NumIDs: 1,
-                    pIDList: ids.as_mut_ptr(),
+        if cfg!(debug_assertions) {
+            unsafe { device.query(&ID3D12InfoQueue1::IID, &mut info_queue as *mut _ as *mut _) }
+                .ok()?;
+            let info_queue = info_queue.as_ref().unwrap();
+            let mut ids = vec![D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE];
+            unsafe {
+                info_queue.AddStorageFilterEntries(&D3D12_INFO_QUEUE_FILTER {
+                    DenyList: D3D12_INFO_QUEUE_FILTER_DESC {
+                        NumIDs: 1,
+                        pIDList: ids.as_mut_ptr(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })?;
+                })?;
+            }
+            let mut callback = 0;
+            unsafe {
+                info_queue.RegisterMessageCallback(
+                    Some(message_callback),
+                    D3D12_MESSAGE_CALLBACK_FLAG_NONE,
+                    ptr::null(),
+                    &mut callback,
+                )
+            }?;
         }
-        let mut callback = 0;
-        unsafe {
-            info_queue.RegisterMessageCallback(
-                Some(message_callback),
-                D3D12_MESSAGE_CALLBACK_FLAG_NONE,
-                ptr::null(),
-                &mut callback,
-            )
-        }?;
 
         Ok(Self {
             factory,

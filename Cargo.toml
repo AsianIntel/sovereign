@@ -7,5 +7,5 @@ members = [
     "sovereign_render"
 ]
 
-[profile.dev.package.gltf]
+[profile.dev.package."*"]
 opt-level = 3

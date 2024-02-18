@@ -79,11 +79,10 @@ pub fn load_gltf(
             base_color_factors: Vec4::from_array(
                 material.pbr_metallic_roughness().base_color_factor(),
             ),
-            metal_rough_factors: Vec2::new(
-                material.pbr_metallic_roughness().metallic_factor(),
-                material.pbr_metallic_roughness().roughness_factor(),
-            ),
-            pad: Vec2::ZERO,
+            perceptual_roughness: material.pbr_metallic_roughness().roughness_factor(),
+            metallic: material.pbr_metallic_roughness().metallic_factor(),
+            reflectance: 0.5,
+            pad: 0.0,
         };
 
         let (color_image, color_sampler) = if let Some(base_color_texture) =

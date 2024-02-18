@@ -14,7 +14,7 @@ use camera::ViewUniform;
 use command_encoder::CommandEncoder;
 use descriptor::DescriptorHeap;
 use device::Device;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use hassle_rs::{compile_hlsl, fake_sign_dxil_in_place};
 use id::{BufferId, ImageId, ViewId};
 use material::{GPUMaterial, Material, MaterialUniform};
@@ -258,6 +258,7 @@ impl Renderer {
                 0.0001,
             ),
             view: Mat4::look_at_lh(Vec3::new(-0.01, 0.005, -0.005), Vec3::ZERO, Vec3::Y),
+            position: Vec4::new(-0.01, 0.005, -0.005, 1.0),
         };
         let view_buffer = device.create_buffer(
             256,

@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+glam = { version = "0.25" }
 sovereign_ecs = { path = "../sovereign_ecs" }
 sovereign_gltf = { path = "../sovereign_gltf" }
 sovereign_render = { path = "../sovereign_render" }

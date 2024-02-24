@@ -98,6 +98,29 @@ impl CommandEncoder {
         }
     }
 
+    pub fn transition_buffer(
+        &self,
+        resource: &AllocatedBuffer,
+        state_before: D3D12_RESOURCE_STATES,
+        state_after: D3D12_RESOURCE_STATES,
+    ) {
+        let barrier = D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                    pResource: unsafe { std::mem::transmute_copy(resource.allocation.resource()) },
+                    StateBefore: state_before,
+                    StateAfter: state_after,
+                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                }),
+            },
+        };
+        unsafe {
+            self.list.ResourceBarrier(&[barrier]);
+        }
+    }
+
     pub fn set_render_target(
         &self,
         render_target: D3D12_CPU_DESCRIPTOR_HANDLE,
@@ -202,6 +225,13 @@ impl CommandEncoder {
         };
         unsafe {
             self.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+        }
+    }
+
+    pub fn copy_buffer_to_buffer(&self, src: &AllocatedBuffer, dst: &AllocatedBuffer) {
+        unsafe {
+            self.list
+                .CopyResource(dst.allocation.resource(), src.allocation.resource());
         }
     }
 }

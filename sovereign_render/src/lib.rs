@@ -10,11 +10,10 @@ mod queue;
 pub mod transform;
 
 use asset::{Assets, Handle};
-use camera::ViewUniform;
+use camera::{Camera, ViewUniform};
 use command_encoder::CommandEncoder;
 use descriptor::DescriptorHeap;
 use device::Device;
-use glam::{Mat4, Vec3, Vec4};
 use hassle_rs::{compile_hlsl, fake_sign_dxil_in_place};
 use id::{BufferId, ImageId, ViewId};
 use material::{GPUMaterial, Material, MaterialUniform};
@@ -88,6 +87,7 @@ pub struct Renderer {
     prepare_mesh_query: PreparedQuery<(&'static Handle<Mesh>,)>,
     prepare_transform_query: PreparedQuery<(&'static GlobalTransform,)>,
     prepare_material_query: PreparedQuery<(&'static Handle<Material>,)>,
+    render_prepare_camera_query: PreparedQuery<(&'static Camera, &'static GlobalTransform)>,
 }
 
 impl Renderer {
@@ -250,16 +250,6 @@ impl Renderer {
 
         let frame_index = unsafe { swapchain.GetCurrentBackBufferIndex() } as usize;
 
-        let view = ViewUniform {
-            projection: Mat4::perspective_lh(
-                60.0f32.to_radians(),
-                width as f32 / height as f32,
-                10000.0,
-                0.0001,
-            ),
-            view: Mat4::look_at_lh(Vec3::new(-0.01, 0.005, -0.005), Vec3::ZERO, Vec3::Y),
-            position: Vec4::new(-0.01, 0.005, -0.005, 1.0),
-        };
         let view_buffer = device.create_buffer(
             256,
             DXGI_FORMAT_UNKNOWN,
@@ -267,17 +257,6 @@ impl Renderer {
             D3D12_RESOURCE_STATE_COMMON,
             MemoryLocation::CpuToGpu,
         )?;
-        {
-            let data = device.map_buffer::<ViewUniform>(view_buffer)?;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    &view as *const _ as *const u8,
-                    data.as_ptr(),
-                    std::mem::size_of::<ViewUniform>(),
-                )
-            };
-            device.unmap_buffer(view_buffer);
-        }
         let view_buffer_resource = device.get_buffer(view_buffer);
         let view_buffer_view_desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
             BufferLocation: unsafe {
@@ -352,6 +331,7 @@ impl Renderer {
         let prepare_mesh_query = PreparedQuery::new();
         let prepare_transform_query = PreparedQuery::new();
         let prepare_material_query = PreparedQuery::new();
+        let render_prepare_camera_query = PreparedQuery::new();
 
         let mut renderer = Self {
             width,
@@ -389,6 +369,7 @@ impl Renderer {
             prepare_mesh_query,
             prepare_transform_query,
             prepare_material_query,
+            render_prepare_camera_query,
         };
 
         let magenta = 0xFFFF00FFu32;
@@ -454,24 +435,38 @@ impl Renderer {
         let mut materials_query = world.get_singleton::<Assets<Material>>();
         let (materials,) = materials_query.get().unwrap();
 
+        self.immediate_command_encoder.reset()?;
         let mut commands = CommandBuffer::new();
         self.prepare_mesh_query
             .query(world.get())
             .iter()
             .for_each(|(entity, (mesh_handle,))| {
                 let mesh = meshes.get(*mesh_handle).unwrap();
+                let staging_vertex_buffer = self
+                    .device
+                    .create_buffer(
+                        mesh.vertices.len() as u64 * std::mem::size_of::<Vertex>() as u64,
+                        DXGI_FORMAT_UNKNOWN,
+                        D3D12_RESOURCE_FLAG_NONE,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                        MemoryLocation::CpuToGpu,
+                    )
+                    .unwrap();
                 let vertex_buffer = self
                     .device
                     .create_buffer(
                         mesh.vertices.len() as u64 * std::mem::size_of::<Vertex>() as u64,
                         DXGI_FORMAT_UNKNOWN,
                         D3D12_RESOURCE_FLAG_NONE,
-                        D3D12_RESOURCE_STATE_COMMON,
-                        MemoryLocation::CpuToGpu,
+                        D3D12_RESOURCE_STATE_COPY_DEST,
+                        MemoryLocation::GpuOnly,
                     )
                     .unwrap();
                 {
-                    let data = self.device.map_buffer::<Vertex>(vertex_buffer).unwrap();
+                    let data = self
+                        .device
+                        .map_buffer::<Vertex>(staging_vertex_buffer)
+                        .unwrap();
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             mesh.vertices.as_ptr() as *const u8,
@@ -479,7 +474,7 @@ impl Renderer {
                             std::mem::size_of::<Vertex>() * mesh.vertices.len(),
                         )
                     };
-                    self.device.unmap_buffer(vertex_buffer);
+                    self.device.unmap_buffer(staging_vertex_buffer);
                 }
                 let vbv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
                     Format: DXGI_FORMAT_UNKNOWN,
@@ -498,18 +493,33 @@ impl Renderer {
                     self.device.get_buffer(vertex_buffer).allocation.resource(),
                     &vbv_desc,
                 );
+                self.immediate_command_encoder.copy_buffer_to_buffer(
+                    self.device.get_buffer(staging_vertex_buffer),
+                    self.device.get_buffer(vertex_buffer),
+                );
+
+                let staging_index_buffer = self
+                    .device
+                    .create_buffer(
+                        mesh.indices.len() as u64 * std::mem::size_of::<u32>() as u64,
+                        DXGI_FORMAT_UNKNOWN,
+                        D3D12_RESOURCE_FLAG_NONE,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                        MemoryLocation::CpuToGpu,
+                    )
+                    .unwrap();
                 let index_buffer = self
                     .device
                     .create_buffer(
                         mesh.indices.len() as u64 * std::mem::size_of::<u32>() as u64,
                         DXGI_FORMAT_UNKNOWN,
                         D3D12_RESOURCE_FLAG_NONE,
-                        D3D12_RESOURCE_STATE_INDEX_BUFFER,
+                        D3D12_RESOURCE_STATE_COPY_DEST,
                         MemoryLocation::CpuToGpu,
                     )
                     .unwrap();
                 {
-                    let data = self.device.map_buffer::<u32>(index_buffer).unwrap();
+                    let data = self.device.map_buffer::<u32>(staging_index_buffer).unwrap();
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             mesh.indices.as_ptr() as *const u8,
@@ -517,8 +527,18 @@ impl Renderer {
                             std::mem::size_of::<u32>() * mesh.indices.len(),
                         )
                     };
-                    self.device.unmap_buffer(index_buffer);
+                    self.device.unmap_buffer(staging_index_buffer);
                 }
+                self.immediate_command_encoder.copy_buffer_to_buffer(
+                    self.device.get_buffer(staging_index_buffer),
+                    self.device.get_buffer(index_buffer),
+                );
+                self.immediate_command_encoder.transition_buffer(
+                    self.device.get_buffer(index_buffer),
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_INDEX_BUFFER,
+                );
+
                 commands.insert_one(
                     entity,
                     GPUMesh {
@@ -593,6 +613,40 @@ impl Renderer {
         drop(materials_query);
 
         commands.run_on(world.get_mut());
+
+        let command_list = self.immediate_command_encoder.finish()?;
+        self.graphics_queue
+            .execute_command_lists(&[Some(command_list)]);
+
+        self.wait_for_previous_frame()?;
+        Ok(())
+    }
+
+    pub fn prepare_render(&mut self, world: &World) -> Result<(), Box<dyn Error>> {
+        self.render_prepare_camera_query
+            .query(world.get())
+            .iter()
+            .for_each(|(_entity, (camera, transform))| {
+                let view = ViewUniform {
+                    projection: camera.projection,
+                    view: transform.transform.inverse(),
+                    position: transform.transform.w_axis,
+                };
+                {
+                    let data = self
+                        .device
+                        .map_buffer::<ViewUniform>(self.view_buffer.buffer).unwrap();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            &view as *const _ as *const u8,
+                            data.as_ptr(),
+                            std::mem::size_of::<ViewUniform>(),
+                        )
+                    };
+                    self.device.unmap_buffer(self.view_buffer.buffer);
+                }
+            });
+
         Ok(())
     }
 

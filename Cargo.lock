@@ -923,6 +923,7 @@ dependencies = [
 name = "sovereign"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "sovereign_ecs",
  "sovereign_gltf",
  "sovereign_render",

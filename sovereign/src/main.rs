@@ -93,6 +93,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                         transform.transform.w_axis += right;
                     });
                 }
+                if key == KeyCode::KeyE {
+                    camera_query.query(world.get()).iter().for_each(|(_entity, (_camera, transform))| {
+                        let up = transform.transform * Vec4::Y;
+                        let up = up.normalize() * 0.0001;
+                        transform.transform.w_axis += up;
+                    });
+                } else if key == KeyCode::KeyQ {
+                    camera_query.query(world.get()).iter().for_each(|(_entity, (_camera, transform))| {
+                        let up = transform.transform * -Vec4::Y;
+                        let up = up.normalize() * 0.0001;
+                        transform.transform.w_axis += up;
+                    });
+                }
             }
         }
         _ => {}
